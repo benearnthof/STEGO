@@ -11,13 +11,17 @@ import torch.nn.functional as F
 import wget
 from PIL import Image
 from scipy.optimize import linear_sum_assignment
-from torch._six import string_classes
+# from torch._six import string_classes # deprecated
+string_classes = str
 from torch.utils.data import DataLoader
 from torch.utils.data._utils.collate import np_str_obj_array_pattern, default_collate_err_msg_format
 from torchmetrics import Metric
 from torchvision import models
 from torchvision import transforms as T
 from torch.utils.tensorboard.summary import hparams
+
+from types import SimpleNamespace as Bunch
+import yaml
 
 
 def prep_for_plot(img, rescale=True, resize=None):
@@ -321,3 +325,15 @@ def flexible_collate(batch):
         return [flexible_collate(samples) for samples in transposed]
 
     raise TypeError(default_collate_err_msg_format.format(elem_type))
+
+
+
+def load_config(path, config_name):
+    # Construct the absolute file path.
+    abs_path = os.path.join(path, config_name)
+    # Load the YAML file and return its content as a Python dictionary.
+    with open(abs_path, 'r') as file:
+        config = yaml.safe_load(file)
+    # Convert the dictionary into a Bunch object.
+    config = Bunch(**config)
+    return config

@@ -1,5 +1,6 @@
-from data import ContrastiveSegDataset
-from modules import *
+from stego.src.data import ContrastiveSegDataset
+from stego.src.modules import *
+
 import os
 from os.path import join
 import hydra
@@ -8,7 +9,8 @@ import torch.multiprocessing
 import torch.multiprocessing
 import torch.nn as nn
 from omegaconf import DictConfig, OmegaConf
-from pytorch_lightning.utilities.seed import seed_everything
+# from pytorch_lightning.utilities.seed import seed_everything
+import pytorch_lightning as pl
 from tqdm import tqdm
 
 
@@ -31,13 +33,14 @@ def my_app(cfg: DictConfig) -> None:
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(join(pytorch_data_dir, "nns"), exist_ok=True)
 
-    seed_everything(seed=0)
+    # seed_everything(seed=0)
+    pl.seed_everything(seed=0)
 
     print(data_dir)
     print(cfg.output_root)
 
     image_sets = ["val", "train"]
-    dataset_names = ["cocostuff27", "cityscapes", "potsdam"]
+    dataset_names = ["cityscapes", "potsdam"] # cocostuff27
     crop_types = ["five", None]
 
     # Uncomment these lines to run on custom datasets
@@ -52,6 +55,13 @@ def my_app(cfg: DictConfig) -> None:
         no_ap_model = torch.nn.Sequential(
             DinoFeaturizer(20, cfg),  # dim doesent matter
             LambdaLayer(lambda p: p[0]),
+        ).cuda()
+    elif cfg.arch == "dinov2":
+        print("using DINOv2")
+        from modules import DinoV2Featurizer, LambdaLayer
+        no_ap_model = torch.nn.Sequential(
+            DinoV2Featurizer(20, cfg),
+            LambdaLayer(lambda p: p[0])
         ).cuda()
     else:
         cut_model = load_model(cfg.model_type, join(cfg.output_root, "data")).cuda()

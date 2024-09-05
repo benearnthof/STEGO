@@ -1,6 +1,7 @@
-from utils import *
-from modules import *
-from data import *
+from stego.src.utils import *
+from stego.src.modules import *
+from stego.src.data import *
+
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from datetime import datetime
@@ -9,13 +10,16 @@ from omegaconf import DictConfig, OmegaConf
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.utilities.seed import seed_everything
+# from pytorch_lightning.utilities.seed import seed_everything
 import torch.multiprocessing
 import seaborn as sns
 from pytorch_lightning.callbacks import ModelCheckpoint
 import sys
 
 torch.multiprocessing.set_sharing_strategy('file_system')
+
+from lightning.pytorch.utilities import disable_possible_user_warnings
+disable_possible_user_warnings()
 
 def get_class_labels(dataset_name):
     if dataset_name.startswith("cityscapes"):
@@ -67,6 +71,9 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
             self.net = FeaturePyramidNet(cfg.granularity, cut_model, dim, cfg.continuous)
         elif cfg.arch == "dino":
             self.net = DinoFeaturizer(dim, cfg)
+        elif cfg.arch == "dinov2":
+            print("Initializing dinov2")
+            self.net = DinoV2Featurizer(dim, cfg)
         else:
             raise ValueError("Unknown arch {}".format(cfg.arch))
 
@@ -268,14 +275,20 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
             cluster_preds = cluster_preds.argmax(1)
             self.cluster_metrics.update(cluster_preds, label)
 
-            return {
+            output = {
                 'img': img[:self.cfg.n_images].detach().cpu(),
                 'linear_preds': linear_preds[:self.cfg.n_images].detach().cpu(),
                 "cluster_preds": cluster_preds[:self.cfg.n_images].detach().cpu(),
-                "label": label[:self.cfg.n_images].detach().cpu()}
+                "label": label[:self.cfg.n_images].detach().cpu()
+            }
 
-    def validation_epoch_end(self, outputs) -> None:
-        super().validation_epoch_end(outputs)
+        # Store the outputs as instance attributes
+        if not hasattr(self, 'val_outputs'):
+            self.val_outputs = []
+        self.val_outputs.append(output)
+
+
+    def on_validation_epoch_end(self) -> None:
         with torch.no_grad():
             tb_metrics = {
                 **self.linear_metrics.compute(),
@@ -284,8 +297,9 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
 
             if self.trainer.is_global_zero and not self.cfg.submitting_to_aml:
                 #output_num = 0
-                output_num = random.randint(0, len(outputs) -1)
-                output = {k: v.detach().cpu() for k, v in outputs[output_num].items()}
+                output_num = random.randint(0, len(self.val_outputs) -1)
+                # output = {k: v.detach().cpu() for k, v in outputs[output_num].items()}
+                output = self.val_outputs[output_num]
 
                 fig, ax = plt.subplots(4, self.cfg.n_images, figsize=(self.cfg.n_images * 3, 4 * 3))
                 for i in range(self.cfg.n_images):
@@ -357,7 +371,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
 
                     plt.tight_layout()
                     add_plot(self.logger.experiment, "label frequency", self.global_step)
-
+            """
             if self.global_step > 2:
                 self.log_dict(tb_metrics)
 
@@ -365,7 +379,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
                     from azureml.core.run import Run
                     run_logger = Run.get_context()
                     for metric, value in tb_metrics.items():
-                        run_logger.log(metric, value)
+                        run_logger.log(metric, value)"""
 
             self.linear_metrics.reset()
             self.cluster_metrics.reset()
@@ -383,10 +397,11 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
         return net_optim, linear_probe_optim, cluster_probe_optim
 
 
-@hydra.main(config_path="configs", config_name="train_config.yml")
+@hydra.main(config_path="configs", config_name="potsdam_s.yml")
 def my_app(cfg: DictConfig) -> None:
     OmegaConf.set_struct(cfg, False)
-    print(OmegaConf.to_yaml(cfg))
+    # print(OmegaConf.to_yaml(cfg))
+    print(cfg.experiment_name)
     pytorch_data_dir = cfg.pytorch_data_dir
     data_dir = join(cfg.output_root, "data")
     log_dir = join(cfg.output_root, "logs")
@@ -400,7 +415,7 @@ def my_app(cfg: DictConfig) -> None:
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    seed_everything(seed=0)
+    pl.seed_everything(seed=0)
 
     print(data_dir)
     print(cfg.output_root)
@@ -443,8 +458,8 @@ def my_app(cfg: DictConfig) -> None:
         dataset_name=cfg.dataset_name,
         crop_type=None,
         image_set="val",
-        transform=get_transform(320, False, val_loader_crop),
-        target_transform=get_transform(320, True, val_loader_crop),
+        transform=get_transform(cfg.valres, False, val_loader_crop),
+        target_transform=get_transform(cfg.valres, True, val_loader_crop),
         mask=True,
         cfg=cfg,
     )
@@ -487,16 +502,21 @@ def my_app(cfg: DictConfig) -> None:
             ModelCheckpoint(
                 dirpath=join(checkpoint_dir, name),
                 every_n_train_steps=400,
-                save_top_k=2,
-                monitor="test/cluster/mIoU",
-                mode="max",
+                monitor="loss/total",
+                mode="min",
+                save_last=True,
             )
         ],
-        **gpu_args
+        accelerator="auto"
+        #**gpu_args
     )
     trainer.fit(model, train_loader, val_loader)
 
 
 if __name__ == "__main__":
+    path = "/dss/dssmcmlfs01/pr74ze/pr74ze-dss-0001/ru25jan4/gitroot/stego/stego/src/configs"
+    config_name = "potsdam_s.yml"
+    cfg = load_config(path, config_name)
+    disable_possible_user_warnings()
     prep_args()
     my_app()

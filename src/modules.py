@@ -1,6 +1,6 @@
 import torch
 
-from utils import *
+from stego.src.utils import *
 import torch.nn.functional as F
 import dino.vision_transformer as vits
 
@@ -15,7 +15,6 @@ class LambdaLayer(nn.Module):
 
 
 class DinoFeaturizer(nn.Module):
-
     def __init__(self, dim, cfg):
         super().__init__()
         self.cfg = cfg
@@ -116,6 +115,85 @@ class DinoFeaturizer(nn.Module):
             return self.dropout(image_feat), code
         else:
             return image_feat, code
+
+
+class DinoV2Featurizer(nn.Module):
+    def __init__(self, dim, cfg, freeze_backbone=True):
+        super().__init__()
+        self.cfg = cfg
+        self.dim = dim # output channels for clustering layers must equal SNGP hidden dim
+        patch_size = self.cfg.dino_patch_size # always 8 because of 224 resolution
+        self.patch_size = patch_size
+        self.feat_type = self.cfg.dino_feat_type # "feat" since we want the feature vector
+        arch = self.cfg.model_type # "dinov2g" vs "dinov2g_reg" #
+        self.n_classes = cfg.num_classes
+        # DINOv2 pretrained backbones have to be cached somewhere but can also be downloaded on class init
+        if "dinov2" in arch:
+            self.model = torch.hub.load('facebookresearch/dinov2', f"{arch}")
+        else: 
+            raise ValueError("Wrong Model Architecture for DINOv2.")
+        # see if cuda is available
+        self.use_cuda = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        # Conditionally freeze the DINO backbone, this only freezes DINO, Stego will still be trainable
+        if freeze_backbone:
+            for p in self.model.parameters():
+                p.requires_grad = False
+
+        if self.use_cuda == torch.device('cuda'):
+            self.model = self.model.to('cuda').eval()
+        else:
+            self.model = self.model.to('cpu').eval()
+            
+        # same as in STEGO paper
+        self.dropout = torch.nn.Dropout2d(p=.1)
+
+        if "s" in arch: # small model
+            self.n_feats = 384
+        elif "b" in arch: # big model
+            self.n_feats = 768
+        elif "l" in arch: # large model
+            self.n_feats = 1024
+        else: # giant model
+            self.n_feats = 1536
+
+        self.cluster1 = self.make_clusterer(self.n_feats)
+        self.proj_type = cfg.projection_type
+        if self.proj_type == "nonlinear":
+            self.cluster2 = self.make_nonlinear_clusterer(self.n_feats)
+        # add this to ensure feature dimensions match with sngp output
+
+    def make_clusterer(self, in_channels):
+        return torch.nn.Sequential(
+            torch.nn.Conv2d(in_channels, self.dim, (1, 1)))  # ,num_classes used to be self.dim
+
+    def make_nonlinear_clusterer(self, in_channels):
+        return torch.nn.Sequential(
+            torch.nn.Conv2d(in_channels, in_channels, (1, 1)),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(in_channels, self.dim, (1, 1))) # , used to be self.dim
+
+    def forward(self, img, n=1):
+        self.model.eval()
+        with torch.no_grad():
+            assert (img.shape[2] % self.patch_size == 0)
+            assert (img.shape[3] % self.patch_size == 0)
+
+            if self.feat_type == "feat": # This is incorrect we need to reshape to match channels = numclasses
+                # dinov2 does the reshaping for us, no permutation required
+                image_feat = self.model.get_intermediate_layers(x=img, n=1, reshape=True)[0]
+                # same dimension, different channel dims are caused by different patch sizes
+            else:
+                raise ValueError("Unknown feat type:{}".format(self.feat_type))
+
+        if self.proj_type is not None:
+            code = self.cluster1(self.dropout(image_feat))
+            if self.proj_type == "nonlinear":
+                code += self.cluster2(self.dropout(image_feat))
+        else:
+            code = image_feat
+
+        return image_feat, code
 
 
 class ResizeAndClassify(nn.Module):

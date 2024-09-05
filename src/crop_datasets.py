@@ -1,4 +1,4 @@
-from modules import *
+from stego.src.modules import *
 import os
 from data import ContrastiveSegDataset
 import hydra
